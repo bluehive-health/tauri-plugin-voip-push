@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="voip_push_incoming_calls_channel">Incoming calls</string>
+    <string name="voip_push_incoming_call">Incoming call</string>
+    <string name="voip_push_unknown_caller">Unknown caller</string>
+    <string name="voip_push_answer">Answer</string>
+    <string name="voip_push_decline">Decline</string>
+</resources>

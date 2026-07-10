@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Merged into the consuming app's manifest by the Gradle manifest merger,
+  so the incoming-call components survive `tauri android init` regeneration
+  of the app's gen/android project.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Self-managed Telecom calls (ConnectionService). -->
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <!-- Ring over the lock screen (Android 14+ lets users toggle this). -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- Incoming-call notifications (Android 13+ runtime prompt). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application>
+        <!-- Wakes on high-priority `call.ring` / `call.ring_cancel` data pushes. -->
+        <service
+            android:name="com.bluehive.voippush.VoipPushMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Self-managed Telecom incoming-call lifecycle. -->
+        <service
+            android:name="com.bluehive.voippush.VoipConnectionService"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
+
+        <!-- Answer / Decline taps on the incoming-call notification. -->
+        <receiver
+            android:name="com.bluehive.voippush.CallActionReceiver"
+            android:exported="false" />
+
+        <!-- Lock-screen ring surface (full-screen intent target). -->
+        <activity
+            android:name="com.bluehive.voippush.IncomingCallActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true" />
+    </application>
+</manifest>

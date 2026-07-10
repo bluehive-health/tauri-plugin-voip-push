@@ -1,0 +1,11 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Allows the app to register this device for APNs/FCM push notifications and bridge native call ring events (CallKit on iOS, Telecom/ConnectionService on Android) to the webview."
+permissions = [
+  "allow-register-for-push",
+  "allow-register-listener",
+  "allow-remove-listener",
+  "allow-drain-pending-call-actions",
+  "allow-end-callkit-call",
+]
