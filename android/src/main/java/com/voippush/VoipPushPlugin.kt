@@ -1,10 +1,11 @@
-package com.bluehive.voippush
+package com.voippush
 
 import android.Manifest
 import android.app.Activity
 import android.os.Build
 import android.provider.Settings
 import android.webkit.WebView
+import app.tauri.PermissionState
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.Permission
@@ -33,8 +34,8 @@ import com.google.firebase.messaging.FirebaseMessaging
  * queued durably (CallStateStore) and announced with a `call_action` event;
  * the webview drains the queue via `drainPendingCallActions` — on the live
  * event when it's running, or after its own startup on a cold start —
- * exactly like iOS. `endCallkitCall` (name kept for cross-platform compat)
- * dismisses the native call when the webview reports it over.
+ * exactly like iOS. `endCall` dismisses the native call when the webview
+ * reports it over.
  *
  * Requires the consuming app module to have Firebase configured
  * (google-services.json + the Google Services Gradle plugin). Without it,
@@ -45,7 +46,15 @@ import com.google.firebase.messaging.FirebaseMessaging
         Permission(strings = [Manifest.permission.POST_NOTIFICATIONS], alias = "notifications")
     ]
 )
-class VoipPushPlugin(private val activity: Activity) : Plugin(activity) {
+class VoipPushPlugin(activity: Activity) : Plugin(activity) {
+
+    /**
+     * Process-scoped context for everything that doesn't strictly need the
+     * Activity — the static [instance] outlives Activity recreations, so
+     * holding the application context avoids pinning a dead Activity's
+     * resources.
+     */
+    private val appContext = activity.applicationContext
 
     override fun load(webView: WebView) {
         super.load(webView)
@@ -55,7 +64,7 @@ class VoipPushPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun registerForPush(invoke: Invoke) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            getPermissionState("notifications").toString().lowercase() != "granted"
+            getPermissionState("notifications") != PermissionState.GRANTED
         ) {
             requestPermissionForAlias("notifications", invoke, "notificationPermissionCallback")
         } else {
@@ -65,7 +74,7 @@ class VoipPushPlugin(private val activity: Activity) : Plugin(activity) {
 
     @PermissionCallback
     fun notificationPermissionCallback(invoke: Invoke) {
-        if (getPermissionState("notifications").toString().lowercase() != "granted") {
+        if (getPermissionState("notifications") != PermissionState.GRANTED) {
             invoke.reject("notification permission denied")
             return
         }
@@ -79,17 +88,17 @@ class VoipPushPlugin(private val activity: Activity) : Plugin(activity) {
      */
     @Command
     fun drainPendingCallActions(invoke: Invoke) {
-        val actions = CallStateStore(activity).drainActions()
+        val actions = CallStateStore(appContext).drainActions()
         val arr = JSArray()
         for (action in actions) {
             arr.put(
                 JSObject().apply {
                     put("kind", action.kind)
                     put("callId", action.callId)
-                    put("wsToken", action.wsToken)
-                    put("from", action.from)
-                    put("personName", action.personName)
-                    put("flowName", action.flowName)
+                    action.joinToken?.let { put("joinToken", it) }
+                    action.from?.let { put("from", it) }
+                    action.personName?.let { put("personName", it) }
+                    action.lineName?.let { put("lineName", it) }
                 },
             )
         }
@@ -100,14 +109,13 @@ class VoipPushPlugin(private val activity: Activity) : Plugin(activity) {
 
     /**
      * The webview reports the call is over (hangup, answered in-app, server
-     * cancel) — dismiss the native call UI if it's still up. Kept under the
-     * iOS command name so cross-platform callers work unchanged.
+     * cancel) — dismiss the native call UI if it's still up.
      */
     @Command
-    fun endCallkitCall(invoke: Invoke) {
+    fun endCall(invoke: Invoke) {
         val args = invoke.parseArgs(EndCallArgs::class.java)
         if (args.callId.isNotEmpty()) {
-            IncomingCallManager.endFromSpa(activity, args.callId)
+            IncomingCallManager.endFromSpa(appContext, args.callId)
         }
         invoke.resolve()
     }
@@ -155,11 +163,11 @@ class VoipPushPlugin(private val activity: Activity) : Plugin(activity) {
 
     /** Stable per app-install+signing-key+user; the Android analog of iOS `identifierForVendor`. */
     private fun stableDeviceId(): String =
-        Settings.Secure.getString(activity.contentResolver, Settings.Secure.ANDROID_ID)
+        Settings.Secure.getString(appContext.contentResolver, Settings.Secure.ANDROID_ID)
             ?: "unknown"
 
     private fun appVersion(): String = try {
-        activity.packageManager.getPackageInfo(activity.packageName, 0).versionName ?: ""
+        appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName ?: ""
     } catch (e: Exception) {
         ""
     }

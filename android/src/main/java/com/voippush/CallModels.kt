@@ -1,4 +1,4 @@
-package com.bluehive.voippush
+package com.voippush
 
 import android.content.Context
 
@@ -13,10 +13,10 @@ data class RingPayload(
     val action: String,
     val callId: String,
     /** Signed token the app uses to join the call — empty on cancel. */
-    val wsToken: String,
+    val joinToken: String,
     val from: String,
     val personName: String,
-    val flowName: String,
+    val lineName: String,
     /** Cancel reason ("answered_elsewhere", "caller_hung_up", …); empty on ring. */
     val reason: String,
     /** ms epoch after which the ring is dead; 0 = no expiry supplied. */
@@ -32,16 +32,16 @@ data class RingPayload(
      */
     fun callerDisplayName(context: Context): String = when {
         personName.isNotEmpty() -> personName
-        flowName.isNotEmpty() && from.isNotEmpty() -> "$flowName · $from"
-        flowName.isNotEmpty() -> flowName
+        lineName.isNotEmpty() && from.isNotEmpty() -> "$lineName · $from"
+        lineName.isNotEmpty() -> lineName
         from.isNotEmpty() -> from
         else -> context.getString(R.string.voip_push_unknown_caller)
     }
 
-    /** Redacts the ws token — a leaked one lets anyone join the call. */
+    /** Redacts the join token — a leaked one lets anyone join the call. */
     override fun toString(): String =
-        "RingPayload(action=$action, callId=$callId, wsToken=<redacted>, from=$from, " +
-            "personName=$personName, flowName=$flowName, reason=$reason, expiresAt=$expiresAt)"
+        "RingPayload(action=$action, callId=$callId, joinToken=<redacted>, from=$from, " +
+            "personName=$personName, lineName=$lineName, reason=$reason, expiresAt=$expiresAt)"
 
     companion object {
         /** Returns null when the message is not a ring/cancel or lacks a call id. */
@@ -53,11 +53,11 @@ data class RingPayload(
             return RingPayload(
                 action = action,
                 callId = callId,
-                wsToken = data["ws_token"] ?: "",
+                joinToken = data["join_token"] ?: "",
                 // `from_number`, not `from` — FCM reserves the `from` data key.
                 from = data["from_number"] ?: "",
                 personName = data["person_name"] ?: "",
-                flowName = data["flow_name"] ?: "",
+                lineName = data["line_name"] ?: "",
                 reason = data["reason"] ?: "",
                 expiresAt = data["expires_at"]?.toLongOrNull() ?: 0L,
             )
@@ -69,20 +69,27 @@ data class RingPayload(
  * One Answer / Decline / End tap on the native call surface, queued until
  * the webview drains it. Field names match the iOS `PendingCallAction`
  * struct — the webview consumes them camelCase via
- * `drain_pending_call_actions`.
+ * `drain_pending_call_actions`. `joinToken`/`from`/`personName`/`lineName`
+ * are only present on "answer" actions.
  */
 data class PendingCallAction(
-    /** "answer" | "decline" (un-answered dismiss) | "end" (answered hangup) */
+    /** [KIND_ANSWER] | [KIND_DECLINE] (un-answered dismiss) | [KIND_END] (answered hangup) */
     val kind: String,
     val callId: String,
     /** Present on "answer" only. */
-    val wsToken: String,
-    val from: String,
-    val personName: String,
-    val flowName: String,
+    val joinToken: String? = null,
+    val from: String? = null,
+    val personName: String? = null,
+    val lineName: String? = null,
 ) {
-    /** Redacts the ws token — a leaked one lets anyone join the call. */
+    /** Redacts the join token — a leaked one lets anyone join the call. */
     override fun toString(): String =
-        "PendingCallAction(kind=$kind, callId=$callId, wsToken=<redacted>, from=$from, " +
-            "personName=$personName, flowName=$flowName)"
+        "PendingCallAction(kind=$kind, callId=$callId, joinToken=<redacted>, from=$from, " +
+            "personName=$personName, lineName=$lineName)"
+
+    companion object {
+        const val KIND_ANSWER = "answer"
+        const val KIND_DECLINE = "decline"
+        const val KIND_END = "end"
+    }
 }

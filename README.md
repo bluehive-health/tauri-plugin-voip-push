@@ -18,7 +18,9 @@ On desktop the plugin compiles but `register_for_push` rejects with an
 
 ## Install
 
-`src-tauri/Cargo.toml`:
+`src-tauri/Cargo.toml` (not yet published to crates.io — use the git URL and
+pin a rev/tag; note the crate uses a Cargo `links` key, so only one version
+can exist in your dependency tree):
 
 ```toml
 [dependencies]
@@ -39,6 +41,11 @@ tauri::Builder::default()
   "permissions": ["voip-push:default"]
 }
 ```
+
+> **Loading remote or untrusted content?** Do not grant `voip-push:default`
+> to that window — drained call actions carry signed call-join tokens, and
+> `end_call` can kill live calls. Grant `voip-push:minimal` instead (token
+> registration + rotation events only). See [Security](#security).
 
 ### iOS setup
 
@@ -68,80 +75,110 @@ tauri::Builder::default()
   (services, receiver, full-screen activity, permissions) merges into your
   app automatically.
 - Your server sends **high-priority data-only** FCM messages for rings.
+- **Exclude the plugin's state file from backups.** Queued call actions
+  (and their join tokens) persist in
+  `shared_prefs/voip_push_call_state.xml`; if your app allows backups
+  (`android:allowBackup="true"`, the default), exclude that file via
+  [`android:fullBackupContent` / `dataExtractionRules`](https://developer.android.com/identity/data/autobackup#IncludingFiles),
+  or set `android:allowBackup="false"`. Tokens are short-lived and
+  age-expired by the plugin, but they should never leave the device.
 
 ## JavaScript usage
 
-There is no JS wrapper package (yet) — use the core API directly:
+Use the typed bindings in [`guest-js`](guest-js) (not yet published to npm
+— install from the repo or vendor the file):
 
 ```ts
-import { invoke } from '@tauri-apps/api/core';
-import { addPluginListener } from '@tauri-apps/api/core';
+import {
+  registerForPush,
+  drainPendingCallActions,
+  endCall,
+  onCallAction,
+  onVoipToken,
+  onFcmToken,
+} from 'tauri-plugin-voip-push-api';
 
 // 1. Register (requests notification permission, resolves with tokens).
-const reg = await invoke<{
-  token: string;        // APNs device token (iOS) or FCM token (Android)
-  voipToken?: string;   // PushKit VoIP token (iOS only)
-  deviceId: string;     // identifierForVendor / ANDROID_ID
-  appVersion?: string;
-  platform: 'ios' | 'android';
-}>('plugin:voip-push|register_for_push');
-// → POST these to your backend so it can target this device.
+//    → POST the result to your backend so it can target this device.
+const reg = await registerForPush();
 
-// 2. Token rotation events.
-await addPluginListener('voip-push', 'voip_token', ({ token }) => { /* re-register */ });
-await addPluginListener('voip-push', 'fcm_token', ({ token }) => { /* re-register */ });
+// 2. Token rotation → re-register with your backend.
+await onVoipToken(({ token }) => {/* iOS PushKit VoIP token */});
+await onFcmToken(({ token }) => {/* Android FCM token */});
 
 // 3. Call actions from the native call UI.
-await addPluginListener('voip-push', 'call_action', async () => {
-  const { actions } = await invoke<{ actions: CallAction[] }>(
-    'plugin:voip-push|drain_pending_call_actions',
-  );
-  // kind: "answer" (carries wsToken) | "decline" | "end"
+await onCallAction(async () => {
+  const actions = await drainPendingCallActions();
+  // kind: "answer" (carries joinToken) | "decline" | "end"
 });
 // Also drain once after your app boots — actions queued while the webview
 // was dead (cold start) wait for you.
 
 // 4. When a call ends (hangup, answered elsewhere, server cancel), dismiss
 //    the native call UI:
-await invoke('plugin:voip-push|end_callkit_call', { callId });
+await endCall(callId);
+```
+
+Or use the core API directly:
+
+```ts
+import { invoke, addPluginListener } from '@tauri-apps/api/core';
+
+const reg = await invoke<PushRegistration>('plugin:voip-push|register_for_push');
+await addPluginListener('voip-push', 'call_action', async () => {
+  const { actions } = await invoke<{ actions: CallAction[] }>(
+    'plugin:voip-push|drain_pending_call_actions',
+  );
+});
+await invoke('plugin:voip-push|end_call', { callId });
 ```
 
 ```ts
+type PushRegistration = {
+  token: string;        // APNs device token (iOS) or FCM token (Android)
+  voipToken?: string;   // PushKit VoIP token (iOS only)
+  deviceId: string;     // identifierForVendor / ANDROID_ID
+  appVersion?: string;
+  platform: 'ios' | 'android';
+};
+
 type CallAction = {
   kind: 'answer' | 'decline' | 'end';
   callId: string;
-  wsToken: string;   // your signed join token — present on "answer"
-  from: string;      // caller number
-  personName: string;
-  flowName: string;  // line/queue name, shown as "Flow · number" fallback
+  joinToken?: string;   // your signed join token — present on "answer"
+  from?: string;        // caller number — present on "answer"
+  personName?: string;  // caller display name — present on "answer"
+  lineName?: string;    // line/queue name, shown as "Line · number" fallback
 };
 ```
 
 ## Push payload contract
 
-Your server triggers rings with these payloads. String values only on FCM
-(all FCM data values are strings).
+Your server triggers rings with these payloads. Payload keys are snake_case
+(APNs/FCM convention); the plugin delivers camelCase to your webview. All
+FCM data values are strings.
 
 ### Ring
 
 iOS — VoIP push (PushKit, `apns-push-type: voip`), flat dictionary;
 Android — FCM **data** message, `priority: high`:
 
-| key           | value                                                        |
-| ------------- | ------------------------------------------------------------ |
-| `action`      | `"ring"`                                                     |
-| `call_id`     | your call id (string)                                        |
-| `ws_token`    | signed token the client uses to join the call                |
-| `from` (iOS) / `from_number` (Android) | caller number (FCM reserves `from`) |
-| `person_name` | caller display name, optional                                |
-| `flow_name`   | line/queue display name, optional                            |
-| `reason`      | empty on ring                                                |
-| `expires_at`  | ms-epoch ring deadline; the client auto-ends the ring after it |
+| key           | value                                                          | notes |
+| ------------- | -------------------------------------------------------------- | ----- |
+| `action`      | `"ring"`                                                       |       |
+| `call_id`     | your call id (string)                                          |       |
+| `join_token`  | signed token the client uses to join the call                  | opaque to the plugin — WebSocket ticket, WebRTC auth, … |
+| `from` / `from_number` | caller number                                         | `from` on iOS; **`from_number` on Android** (FCM reserves `from`) |
+| `person_name` | caller display name, optional                                  |       |
+| `line_name`   | line/queue display name, optional                              | shown as "Line · number" when `person_name` is absent |
+| `expires_at`  | ms-epoch ring deadline; the client auto-ends the ring after it |       |
 
 ### Cancel
 
-Same channels, `action: "cancel"` + `call_id` + `reason`
-(`"answered_elsewhere"`, `"caller_hung_up"`, `"timeout"`, …). Send it to all
+Same channels, `action: "cancel"` + `call_id` + `reason`. `reason` picks the
+native disconnect cause: anything containing `answer` (e.g.
+`"answered_elsewhere"`) shows "answered on another device"; anything else
+(`"caller_hung_up"`, `"timeout"`, …) shows a remote hangup. Send it to all
 of a user's devices when the ring resolves anywhere.
 
 ## Commands & events
@@ -150,13 +187,62 @@ of a user's devices when the ring resolves anywhere.
 | ---------------------------- | --------------------------------------------------- |
 | `register_for_push`          | Permission prompt + token acquisition               |
 | `drain_pending_call_actions` | Read-and-clear queued Answer/Decline/End actions    |
-| `end_callkit_call`           | Dismiss the native call UI for a `callId` (both platforms; name kept for compat) |
+| `end_call`                   | Dismiss the native call UI for a `callId`           |
 
-| Event         | Fired when                                        |
-| ------------- | ------------------------------------------------- |
-| `voip_token`  | iOS PushKit VoIP token delivered/rotated          |
-| `fcm_token`   | Android FCM token rotated mid-session             |
-| `call_action` | A native call action was queued — drain the queue |
+| Event         | Platform | Fired when                                        |
+| ------------- | -------- | ------------------------------------------------- |
+| `voip_token`  | iOS      | PushKit VoIP token delivered/rotated              |
+| `fcm_token`   | Android  | FCM token rotated mid-session                     |
+| `call_action` | both     | A native call action was queued — drain the queue |
+
+The two token events stay separate on purpose: iOS carries **two** tokens
+(APNs alert + PushKit VoIP) with different destinations on your server,
+while Android has one FCM token.
+
+## Security
+
+- **Join tokens.** `join_token` is a bearer credential for the call. The
+  plugin never logs it (`toString()` implementations redact it), drops
+  un-drained actions after 24 hours, and caps the queue at 50 entries. Keep
+  server-side lifetimes short (a ring's lifetime) and single-use.
+- **Android at-rest state.** Rings and queued actions persist in
+  SharedPreferences so they survive process death. Exclude
+  `voip_push_call_state.xml` from backups (see [Android setup](#android-setup)).
+- **Capability scoping.** `voip-push:default` grants the full surface. For
+  windows that load remote/untrusted content, grant `voip-push:minimal`
+  (registration + listeners only) — or nothing.
+- **Payload trust.** Ring payloads come from your server via APNs/FCM.
+  Malformed or expired pushes are reported to CallKit as throwaway calls
+  (Apple's contract) or dropped (Android); no payload data is evaluated or
+  rendered as markup.
+
+## Privacy
+
+`register_for_push` returns device identifiers to your webview:
+`identifierForVendor` (iOS) and `ANDROID_ID` (Android). Both are app-scoped
+and reset on uninstall (iOS) or app-signing/user change (Android). If you
+send them to your backend, disclose that in your privacy policy and the
+App Store / Play data-safety forms.
+
+## Platform differences & known limitations
+
+- **State durability.** Android persists rings and queued actions in
+  SharedPreferences (the FCM service can run and die without the webview
+  ever booting). iOS keeps them in memory — a VoIP push always launches the
+  app, so memory suffices. If iOS terminates the app *mid-ring* (rare;
+  e.g. force-quit), CallKit may still show the call but the answer cannot
+  be fulfilled — the ring dies on tap.
+- **Ring surfaces.** iOS: CallKit only (a Do-Not-Disturb refusal means no
+  ring). Android: Telecom (self-managed) *plus* a CallStyle full-screen
+  notification, so the ring survives Telecom refusals; on Android 14+ the
+  full-screen surface degrades to a heads-up banner if the user disables
+  the special full-screen-intent permission.
+- **Lock-screen answer.** iOS does not foreground the app on a lock-screen
+  answer; the webview joins when the user opens the app. Android launches
+  the app after an answer where background-activity-launch rules allow.
+- **CallKit config is fixed** (audio-only, single call group) and the
+  Android notification uses a system icon. Configuration hooks are on the
+  roadmap.
 
 ## How it works
 
@@ -165,12 +251,13 @@ of a user's devices when the ring resolves anywhere.
   runtime (`class_addMethod`), a `PKPushRegistry` acquires the VoIP token on
   every launch, and incoming VoIP pushes are reported to CallKit
   synchronously. Call actions queue in memory (a VoIP push always relaunches
-  the app).
-- **Android** ([android/src/main/java/com/bluehive/voippush](android/src/main/java/com/bluehive/voippush)):
+  the app), deduped and capped.
+- **Android** ([android/src/main/java/com/voippush](android/src/main/java/com/voippush)):
   a `FirebaseMessagingService` wakes on data pushes, reports the call to
   Telecom (self-managed) *and* posts a CallStyle full-screen notification, so
   the ring survives Telecom refusals. Call actions persist in
-  SharedPreferences (the FCM process can die before the webview ever boots).
+  SharedPreferences (the FCM process can die before the webview ever boots),
+  deduped, capped, and age-expired.
 
 ## License
 

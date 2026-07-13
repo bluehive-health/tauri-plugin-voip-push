@@ -1,4 +1,4 @@
-package com.bluehive.voippush
+package com.voippush
 
 import android.content.ComponentName
 import android.content.Context
@@ -57,7 +57,7 @@ object IncomingCallManager {
     fun startRing(context: Context, ring: RingPayload) {
         val store = CallStateStore(context)
         if (store.getRing(ring.callId) != null) return // duplicate push
-        if (ring.isExpired || ring.wsToken.isEmpty()) {
+        if (ring.isExpired || ring.joinToken.isEmpty()) {
             Log.w(TAG, "dropping unusable ring for ${ring.callId} (expired or tokenless)")
             return
         }
@@ -127,12 +127,12 @@ object IncomingCallManager {
         store.markAnswered(callId)
         store.enqueueAction(
             PendingCallAction(
-                kind = "answer",
+                kind = PendingCallAction.KIND_ANSWER,
                 callId = callId,
-                wsToken = ring.wsToken,
+                joinToken = ring.joinToken,
                 from = ring.from,
                 personName = ring.personName,
-                flowName = ring.flowName,
+                lineName = ring.lineName,
             ),
         )
         connections[callId]?.let {
@@ -152,10 +152,7 @@ object IncomingCallManager {
         val store = CallStateStore(context)
         if (store.getRing(callId) == null) return
         store.enqueueAction(
-            PendingCallAction(
-                kind = "decline", callId = callId,
-                wsToken = "", from = "", personName = "", flowName = "",
-            ),
+            PendingCallAction(kind = PendingCallAction.KIND_DECLINE, callId = callId),
         )
         cleanUp(context, callId, DisconnectCause(DisconnectCause.REJECTED))
         VoipPushPlugin.instance?.emitCallAction()
@@ -171,10 +168,7 @@ object IncomingCallManager {
         if (store.getRing(callId) == null) return
         if (store.isAnswered(callId)) {
             store.enqueueAction(
-                PendingCallAction(
-                    kind = "end", callId = callId,
-                    wsToken = "", from = "", personName = "", flowName = "",
-                ),
+                PendingCallAction(kind = PendingCallAction.KIND_END, callId = callId),
             )
             cleanUp(context, callId, DisconnectCause(DisconnectCause.LOCAL))
             VoipPushPlugin.instance?.emitCallAction()
@@ -204,7 +198,7 @@ object IncomingCallManager {
         cleanUp(context, callId, cause)
     }
 
-    /** The webview reported the call over (`end_callkit_call` command). */
+    /** The webview reported the call over (`end_call` command). */
     fun endFromSpa(context: Context, callId: String) {
         cleanUp(context, callId, DisconnectCause(DisconnectCause.LOCAL))
     }

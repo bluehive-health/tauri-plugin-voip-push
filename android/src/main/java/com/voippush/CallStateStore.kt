@@ -1,4 +1,4 @@
-package com.bluehive.voippush
+package com.voippush
 
 import android.content.Context
 import android.content.SharedPreferences
@@ -35,13 +35,15 @@ class CallStateStore(context: Context) {
     fun saveRing(ring: RingPayload) {
         val json = JSONObject()
             .put("callId", ring.callId)
-            .put("wsToken", ring.wsToken)
+            .put("joinToken", ring.joinToken)
             .put("from", ring.from)
             .put("personName", ring.personName)
-            .put("flowName", ring.flowName)
+            .put("lineName", ring.lineName)
             .put("expiresAt", ring.expiresAt)
             .put("answered", false)
-        prefs.edit().putString(RING_KEY_PREFIX + ring.callId, json.toString()).apply()
+        // commit(), not apply(): the FCM process can be killed right after
+        // this write, and a lost ring means an unanswerable call.
+        prefs.edit().putString(RING_KEY_PREFIX + ring.callId, json.toString()).commit()
     }
 
     @Synchronized
@@ -53,7 +55,7 @@ class CallStateStore(context: Context) {
             // Self-purge: the process can die mid-ring, taking the cleanup
             // timer with it. An unanswered ring past its expiry is dead —
             // drop it so stale entries can't accumulate or shadow the
-            // dupe-check. Answered calls stay until end_callkit_call.
+            // dupe-check. Answered calls stay until end_call.
             if (!json.optBoolean("answered") &&
                 expiresAt > 0 &&
                 expiresAt <= System.currentTimeMillis()
@@ -64,10 +66,10 @@ class CallStateStore(context: Context) {
             RingPayload(
                 action = "ring",
                 callId = json.getString("callId"),
-                wsToken = json.optString("wsToken"),
+                joinToken = json.optString("joinToken"),
                 from = json.optString("from"),
                 personName = json.optString("personName"),
-                flowName = json.optString("flowName"),
+                lineName = json.optString("lineName"),
                 reason = "",
                 expiresAt = expiresAt,
             )
@@ -81,7 +83,8 @@ class CallStateStore(context: Context) {
         val raw = prefs.getString(RING_KEY_PREFIX + callId, null) ?: return
         try {
             val json = JSONObject(raw).put("answered", true)
-            prefs.edit().putString(RING_KEY_PREFIX + callId, json.toString()).apply()
+            // commit(): losing this write would turn a hangup into a decline.
+            prefs.edit().putString(RING_KEY_PREFIX + callId, json.toString()).commit()
         } catch (e: Exception) {
             /* corrupt entry — removeRing will clean it up */
         }
@@ -106,10 +109,16 @@ class CallStateStore(context: Context) {
     // Pending call actions (drained by the webview)
     // ---------------------------------------------------------------
 
-    /** Queue an action unless an identical kind+callId one is already waiting. */
+    /**
+     * Queue an action unless an identical kind+callId one is already waiting.
+     * The queue is capped ([MAX_PENDING_ACTIONS], oldest dropped first) and
+     * entries expire after [MAX_ACTION_AGE_MS] — an un-drained action from
+     * hours ago belongs to a call that is long over, and its join token
+     * should not linger on disk.
+     */
     @Synchronized
     fun enqueueAction(action: PendingCallAction) {
-        val actions = readActions()
+        val actions = pruneActions(readActions())
         for (i in 0 until actions.length()) {
             val existing = actions.getJSONObject(i)
             if (existing.optString("kind") == action.kind &&
@@ -122,20 +131,23 @@ class CallStateStore(context: Context) {
             JSONObject()
                 .put("kind", action.kind)
                 .put("callId", action.callId)
-                .put("wsToken", action.wsToken)
+                .put("joinToken", action.joinToken)
                 .put("from", action.from)
                 .put("personName", action.personName)
-                .put("flowName", action.flowName),
+                .put("lineName", action.lineName)
+                .put("queuedAt", System.currentTimeMillis()),
         )
-        prefs.edit().putString(ACTIONS_KEY, actions.toString()).apply()
+        while (actions.length() > MAX_PENDING_ACTIONS) actions.remove(0)
+        // commit(): an async apply() can lose an Answer tap to process death.
+        prefs.edit().putString(ACTIONS_KEY, actions.toString()).commit()
     }
 
-    /** Return all queued actions and clear the queue (atomic read-and-clear). */
+    /** Return all queued, un-expired actions and clear the queue (atomic read-and-clear). */
     @Synchronized
     fun drainActions(): List<PendingCallAction> {
-        val actions = readActions()
-        if (actions.length() == 0) return emptyList()
+        val actions = pruneActions(readActions())
         prefs.edit().remove(ACTIONS_KEY).apply()
+        if (actions.length() == 0) return emptyList()
         val out = mutableListOf<PendingCallAction>()
         for (i in 0 until actions.length()) {
             try {
@@ -144,10 +156,10 @@ class CallStateStore(context: Context) {
                     PendingCallAction(
                         kind = json.getString("kind"),
                         callId = json.getString("callId"),
-                        wsToken = json.optString("wsToken"),
-                        from = json.optString("from"),
-                        personName = json.optString("personName"),
-                        flowName = json.optString("flowName"),
+                        joinToken = json.optStringOrNull("joinToken"),
+                        from = json.optStringOrNull("from"),
+                        personName = json.optStringOrNull("personName"),
+                        lineName = json.optStringOrNull("lineName"),
                     ),
                 )
             } catch (e: Exception) {
@@ -155,6 +167,24 @@ class CallStateStore(context: Context) {
             }
         }
         return out
+    }
+
+    /** Drop actions past [MAX_ACTION_AGE_MS] (entries without a timestamp are kept). */
+    private fun pruneActions(actions: JSONArray): JSONArray {
+        val cutoff = System.currentTimeMillis() - MAX_ACTION_AGE_MS
+        val kept = JSONArray()
+        for (i in 0 until actions.length()) {
+            val entry = actions.optJSONObject(i) ?: continue
+            val queuedAt = entry.optLong("queuedAt", Long.MAX_VALUE)
+            if (queuedAt >= cutoff) kept.put(entry)
+        }
+        return kept
+    }
+
+    private fun JSONObject.optStringOrNull(key: String): String? {
+        if (isNull(key)) return null
+        val value = optString(key)
+        return value.ifEmpty { null }
     }
 
     private fun readActions(): JSONArray {
@@ -170,5 +200,11 @@ class CallStateStore(context: Context) {
         private const val PREFS_NAME = "voip_push_call_state"
         private const val RING_KEY_PREFIX = "ring:"
         private const val ACTIONS_KEY = "pending_actions"
+
+        /** A stuck webview should not let taps (and their tokens) pile up forever. */
+        private const val MAX_PENDING_ACTIONS = 50
+
+        /** Un-drained actions older than this are for calls that are long over. */
+        private const val MAX_ACTION_AGE_MS = 24L * 60 * 60 * 1000
     }
 }

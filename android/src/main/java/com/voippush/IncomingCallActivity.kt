@@ -1,7 +1,6 @@
-package com.bluehive.voippush
+package com.voippush
 
 import android.app.Activity
-import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
@@ -64,16 +63,17 @@ class IncomingCallActivity : Activity() {
         fun dp(value: Int): Int = (value * density).toInt()
 
         val callerName = ring.callerDisplayName(this)
+        val white = getColor(android.R.color.white)
 
         val heading = TextView(this).apply {
             text = getString(R.string.voip_push_incoming_call)
-            setTextColor(Color.WHITE)
+            setTextColor(white)
             textSize = 18f
             gravity = Gravity.CENTER
         }
         val caller = TextView(this).apply {
             text = callerName
-            setTextColor(Color.WHITE)
+            setTextColor(white)
             textSize = 28f
             setTypeface(typeface, Typeface.BOLD)
             gravity = Gravity.CENTER
@@ -81,8 +81,8 @@ class IncomingCallActivity : Activity() {
         }
         val answer = Button(this).apply {
             text = getString(R.string.voip_push_answer)
-            setBackgroundColor(Color.parseColor("#16A34A"))
-            setTextColor(Color.WHITE)
+            setBackgroundColor(getColor(R.color.voip_push_answer))
+            setTextColor(white)
             setOnClickListener {
                 callId?.let { id -> IncomingCallManager.answer(this@IncomingCallActivity, id) }
                 finish()
@@ -90,8 +90,8 @@ class IncomingCallActivity : Activity() {
         }
         val decline = Button(this).apply {
             text = getString(R.string.voip_push_decline)
-            setBackgroundColor(Color.parseColor("#DC2626"))
-            setTextColor(Color.WHITE)
+            setBackgroundColor(getColor(R.color.voip_push_decline))
+            setTextColor(white)
             setOnClickListener {
                 callId?.let { id -> IncomingCallManager.decline(this@IncomingCallActivity, id) }
                 finish()
@@ -109,7 +109,7 @@ class IncomingCallActivity : Activity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setBackgroundColor(Color.parseColor("#111827"))
+            setBackgroundColor(getColor(R.color.voip_push_ring_background))
             addView(heading)
             addView(caller)
             addView(buttons)

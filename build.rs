@@ -2,11 +2,12 @@ const COMMANDS: &[&str] = &[
     "register_for_push",
     // VoIP + native call bridge. `register_listener`/`remove_listener`
     // back the webview's `addPluginListener` (voip_token / fcm_token /
-    // call_action events); the other two are direct native commands.
+    // call_action events); the other two route through the Rust command
+    // handlers in src/commands.rs.
     "register_listener",
     "remove_listener",
     "drain_pending_call_actions",
-    "end_callkit_call",
+    "end_call",
 ];
 
 fn main() {

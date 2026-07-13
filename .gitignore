@@ -10,3 +10,8 @@
 
 /target/
 /Cargo.lock
+
+# guest-js build artifacts.
+/guest-js/node_modules/
+/guest-js/dist/
+/guest-js/pnpm-lock.yaml

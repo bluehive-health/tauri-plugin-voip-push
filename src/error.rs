@@ -6,6 +6,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("push registration is only supported on iOS and Android")]
     UnsupportedPlatform,
+    #[error(transparent)]
+    Tauri(#[from] tauri::Error),
     #[cfg(any(target_os = "ios", target_os = "android"))]
     #[error(transparent)]
     PluginInvoke(#[from] tauri::plugin::mobile::PluginInvokeError),

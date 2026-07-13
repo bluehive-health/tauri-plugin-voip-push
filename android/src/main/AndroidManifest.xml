@@ -15,7 +15,7 @@
     <application>
         <!-- Wakes on high-priority `call.ring` / `call.ring_cancel` data pushes. -->
         <service
-            android:name="com.bluehive.voippush.VoipPushMessagingService"
+            android:name="com.voippush.VoipPushMessagingService"
             android:exported="false">
             <intent-filter>
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
@@ -24,7 +24,7 @@
 
         <!-- Self-managed Telecom incoming-call lifecycle. -->
         <service
-            android:name="com.bluehive.voippush.VoipConnectionService"
+            android:name="com.voippush.VoipConnectionService"
             android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE"
             android:exported="true">
             <intent-filter>
@@ -34,12 +34,12 @@
 
         <!-- Answer / Decline taps on the incoming-call notification. -->
         <receiver
-            android:name="com.bluehive.voippush.CallActionReceiver"
+            android:name="com.voippush.CallActionReceiver"
             android:exported="false" />
 
         <!-- Lock-screen ring surface (full-screen intent target). -->
         <activity
-            android:name="com.bluehive.voippush.IncomingCallActivity"
+            android:name="com.voippush.IncomingCallActivity"
             android:exported="false"
             android:excludeFromRecents="true"
             android:launchMode="singleTop"

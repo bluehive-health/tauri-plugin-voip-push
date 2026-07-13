@@ -7,5 +7,18 @@ permissions = [
   "allow-register-listener",
   "allow-remove-listener",
   "allow-drain-pending-call-actions",
-  "allow-end-callkit-call",
+  "allow-end-call",
+]
+
+# For apps that load remote or otherwise less-trusted content: token
+# registration and rotation events only, without the call-action bridge
+# (drained actions carry signed call-join tokens, and end_call can kill
+# live calls).
+[[set]]
+identifier = "minimal"
+description = "Push-token registration and rotation events only — no access to queued call actions (which carry call-join tokens) or to ending calls."
+permissions = [
+  "allow-register-for-push",
+  "allow-register-listener",
+  "allow-remove-listener",
 ]
