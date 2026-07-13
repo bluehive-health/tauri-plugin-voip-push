@@ -1,4 +1,4 @@
-package com.bluehive.voippush
+package com.voippush
 
 import android.telecom.Connection
 import android.telecom.ConnectionRequest
@@ -60,7 +60,7 @@ class VoipConnectionService : ConnectionService() {
     }
 
     companion object {
-        const val EXTRA_CALL_ID = "com.bluehive.voippush.CALL_ID"
+        const val EXTRA_CALL_ID = "com.voippush.CALL_ID"
     }
 }
 
@@ -70,17 +70,17 @@ class VoipConnectionService : ConnectionService() {
  * `setDisconnected`) flow back from the manager.
  */
 class VoipConnection(
-    private val appContext: android.content.Context,
+    private val context: android.content.Context,
     private val callId: String?,
 ) : Connection() {
 
     /** Telecom wants us to show the ring UI (self-managed contract). */
     override fun onShowIncomingCallUi() {
-        callId?.let { IncomingCallManager.showIncomingCallUi(appContext, it) }
+        callId?.let { IncomingCallManager.showIncomingCallUi(context, it) }
     }
 
     override fun onAnswer() {
-        callId?.let { IncomingCallManager.answer(appContext, it) }
+        callId?.let { IncomingCallManager.answer(context, it) }
     }
 
     override fun onAnswer(videoState: Int) {
@@ -88,7 +88,7 @@ class VoipConnection(
     }
 
     override fun onReject() {
-        callId?.let { IncomingCallManager.decline(appContext, it) }
+        callId?.let { IncomingCallManager.decline(context, it) }
             ?: run {
                 setDisconnected(DisconnectCause(DisconnectCause.REJECTED))
                 destroy()
@@ -96,7 +96,7 @@ class VoipConnection(
     }
 
     override fun onDisconnect() {
-        callId?.let { IncomingCallManager.telecomDisconnect(appContext, it) }
+        callId?.let { IncomingCallManager.telecomDisconnect(context, it) }
             ?: run {
                 setDisconnected(DisconnectCause(DisconnectCause.LOCAL))
                 destroy()

@@ -5,6 +5,9 @@ description = "Tauri v2 plugin for VoIP push calling: APNs/FCM push-token acquis
 authors = ["BlueHive"]
 license = "MIT"
 repository = "https://github.com/bluehive-health/tauri-plugin-voip-push"
+documentation = "https://github.com/bluehive-health/tauri-plugin-voip-push#readme"
+keywords = ["tauri", "plugin", "voip", "push-notifications", "callkit"]
+categories = ["api-bindings"]
 edition = "2021"
 rust-version = "1.77.2"
 links = "tauri-plugin-voip-push"
@@ -13,6 +16,9 @@ links = "tauri-plugin-voip-push"
 tauri = "2"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
 
 [build-dependencies]
 tauri-plugin = { version = "2", features = ["build"] }

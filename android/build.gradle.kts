@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.bluehive.voippush"
+    namespace = "com.voippush"
     compileSdk = 34
 
     defaultConfig {
@@ -34,7 +34,7 @@ dependencies {
     compileOnly(project(":tauri-android"))
     // FCM token acquisition. The Google Services plugin (and its
     // google-services.json) must be applied in the consuming APP module.
-    implementation("com.google.firebase:firebase-messaging:24.1.0")
+    implementation("com.google.firebase:firebase-messaging:24.1.2")
     // NotificationCompat.CallStyle + Person for the incoming-call ring UI.
     implementation("androidx.core:core-ktx:1.13.1")
 }

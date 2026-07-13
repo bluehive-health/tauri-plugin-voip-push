@@ -1,0 +1,39 @@
+{
+  "name": "tauri-plugin-voip-push-api",
+  "version": "0.1.0",
+  "description": "Typed JavaScript bindings for tauri-plugin-voip-push: APNs/FCM push-token acquisition plus native incoming-call UI (CallKit on iOS, Telecom on Android)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bluehive-health/tauri-plugin-voip-push.git"
+  },
+  "keywords": [
+    "tauri",
+    "tauri-plugin",
+    "voip",
+    "push-notifications",
+    "callkit"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

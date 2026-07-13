@@ -1,4 +1,4 @@
-package com.bluehive.voippush
+package com.voippush
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -27,8 +27,8 @@ object IncomingCallNotifier {
 
     private const val CHANNEL_ID = "incoming_calls"
 
-    const val ACTION_ANSWER = "com.bluehive.voippush.ACTION_ANSWER"
-    const val ACTION_DECLINE = "com.bluehive.voippush.ACTION_DECLINE"
+    const val ACTION_ANSWER = "com.voippush.ACTION_ANSWER"
+    const val ACTION_DECLINE = "com.voippush.ACTION_DECLINE"
     const val EXTRA_CALL_ID = "call_id"
 
     fun show(context: Context, ring: RingPayload) {

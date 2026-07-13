@@ -1,4 +1,4 @@
-package com.bluehive.voippush
+package com.voippush
 
 import android.content.BroadcastReceiver
 import android.content.Context

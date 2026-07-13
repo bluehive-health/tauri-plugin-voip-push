@@ -37,8 +37,8 @@ import WebKit
  *     `PendingCallAction`s and announced with a `call_action` plugin event.
  *     The webview drains the queue (`drainPendingCallActions`) — on the live
  *     event when it's running, or after its own startup on a cold start —
- *     and joins the call using the `wsToken` carried in the payload.
- *   - The webview calls `endCallkitCall` when a call ends (hangup, answered
+ *     and joins the call using the `joinToken` carried in the payload.
+ *   - The webview calls `endCall` when a call ends (hangup, answered
  *     in-app, server cancel) so the green system call UI goes away.
  *
  * Everything CallKit-related runs on the main queue (PushKit is created with
@@ -47,19 +47,31 @@ import WebKit
  */
 /// One Accept / Decline / End tap on the native call screen, queued until
 /// the webview drains it. Field names are what the webview consumes
-/// (camelCase over the Tauri channel).
+/// (camelCase over the Tauri channel). `joinToken`/`from`/`personName`/
+/// `lineName` are only present on "answer" actions.
 struct PendingCallAction: Encodable {
-  /// "answer" | "decline" (un-answered End tap) | "end" (answered End tap)
+  static let kindAnswer = "answer"
+  static let kindDecline = "decline"
+  static let kindEnd = "end"
+
+  /// `kindAnswer` | `kindDecline` (un-answered End tap) | `kindEnd` (answered End tap)
   var kind: String
   var callId: String
   /// Signed token the app uses to join the call — present on "answer".
-  var wsToken: String
-  var from: String
-  var personName: String
-  var flowName: String
+  var joinToken: String?
+  var from: String?
+  var personName: String?
+  var lineName: String?
 }
 
-struct EndCallkitCallArgs: Decodable {
+/// A queued action plus when it was queued, so stale entries (and the
+/// tokens they carry) can be dropped instead of lingering forever.
+private struct QueuedCallAction {
+  let action: PendingCallAction
+  let enqueuedAt: Date
+}
+
+struct EndCallArgs: Decodable {
   let callId: String
 }
 
@@ -76,8 +88,16 @@ class VoipPushPlugin: Plugin {
   private let pendingLock = NSLock()
   private var delegateHooksInstalled = false
 
-  /// Give APNs ample time on slow networks before failing the invoke.
+  /// APNs token-acquisition timeout. Generous enough for slow cellular
+  /// networks; cancelled the moment the token (or a failure) arrives so a
+  /// stale timer can never reject a later registration. Main-queue only.
   private static let tokenTimeoutSeconds: TimeInterval = 30
+  private var tokenTimeoutWork: DispatchWorkItem?
+
+  /// Un-drained call actions are dropped past this cap / age — a stuck
+  /// webview must not let taps (and their join tokens) pile up forever.
+  private static let maxPendingCallActions = 50
+  private static let maxPendingActionAge: TimeInterval = 24 * 60 * 60
 
   /// The host app's user-visible name, for CallKit surfaces.
   fileprivate static var appDisplayName: String {
@@ -105,8 +125,9 @@ class VoipPushPlugin: Plugin {
   fileprivate var answeredCallIds: Set<String> = []
   /// Accept/Decline/End taps not yet drained by the webview. A cold-started
   /// webview asks for these after it boots; a live webview drains on the
-  /// `call_action` event.
-  fileprivate var pendingCallActions: [PendingCallAction] = []
+  /// `call_action` event. Deduped, capped, and age-expired — see
+  /// `enqueueCallAction` / `prunePendingCallActions`.
+  private var pendingCallActions: [QueuedCallAction] = []
 
   override init() {
     super.init()
@@ -137,9 +158,16 @@ class VoipPushPlugin: Plugin {
         self.installDelegateHooks()
         self.enqueue(invoke)
         UIApplication.shared.registerForRemoteNotifications()
-        DispatchQueue.main.asyncAfter(deadline: .now() + VoipPushPlugin.tokenTimeoutSeconds) {
-          self.rejectPending("timed out waiting for APNs device token")
+        // (Re)arm the timeout as a cancellable work item: success or failure
+        // cancels it, so it can never fire into a later registration.
+        self.tokenTimeoutWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+          self?.tokenTimeoutWork = nil
+          self?.rejectPending("timed out waiting for APNs device token")
         }
+        self.tokenTimeoutWork = work
+        DispatchQueue.main.asyncAfter(
+          deadline: .now() + VoipPushPlugin.tokenTimeoutSeconds, execute: work)
       }
     }
   }
@@ -161,6 +189,7 @@ class VoipPushPlugin: Plugin {
   }
 
   fileprivate func resolvePending(token: String) {
+    cancelTokenTimeout()
     let deviceId = UIDevice.current.identifierForVendor?.uuidString ?? "unknown"
     let appVersion =
       Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
@@ -177,9 +206,17 @@ class VoipPushPlugin: Plugin {
   }
 
   fileprivate func rejectPending(_ message: String) {
+    cancelTokenTimeout()
     for invoke in drainPending() {
       invoke.reject(message)
     }
+  }
+
+  /// Main-queue only (APNs delegate callbacks and the timeout both land
+  /// on the main queue).
+  private func cancelTokenTimeout() {
+    tokenTimeoutWork?.cancel()
+    tokenTimeoutWork = nil
   }
 
   // MARK: - App-delegate hook injection
@@ -270,7 +307,8 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
   /// event fires while it's alive — draining is what dedupes the two paths.
   @objc func drainPendingCallActions(_ invoke: Invoke) {
     DispatchQueue.main.async {
-      let actions = self.pendingCallActions
+      self.prunePendingCallActions()
+      let actions = self.pendingCallActions.map { $0.action }
       self.pendingCallActions = []
       invoke.resolve(DrainCallActionsResponse(actions: actions))
     }
@@ -278,8 +316,8 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
 
   /// The webview reports the call is over (hangup, answered in-app, server
   /// cancel) — dismiss the system call UI if it's still up.
-  @objc func endCallkitCall(_ invoke: Invoke) throws {
-    let args = try invoke.parseArgs(EndCallkitCallArgs.self)
+  @objc func endCall(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(EndCallArgs.self)
     DispatchQueue.main.async {
       self.endSystemCall(callId: args.callId, reason: .remoteEnded)
       invoke.resolve()
@@ -320,8 +358,8 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
   }
 
   /// Expected payload shape (see README): flat keys `action`, `call_id`,
-  /// `ws_token`, `from`, `to`, `person_name`, `flow_name`, `flow_id`,
-  /// `reason`, `expires_at` (ms epoch).
+  /// `join_token`, `from`, `person_name`, `line_name`, `reason`,
+  /// `expires_at` (ms epoch).
   private func handleVoipPush(_ dict: [AnyHashable: Any]) {
     let action = dict["action"] as? String ?? ""
     let callId = dict["call_id"] as? String ?? ""
@@ -340,8 +378,8 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
       return
     }
 
-    guard action == "ring", !callId.isEmpty, let wsToken = dict["ws_token"] as? String,
-      !wsToken.isEmpty
+    guard action == "ring", !callId.isEmpty, let joinToken = dict["join_token"] as? String,
+      !joinToken.isEmpty
     else {
       NSLog("[voip-push] malformed VoIP push (action=%@) — reporting throwaway call", action)
       reportAndImmediatelyEnd(reason: .failed)
@@ -350,7 +388,7 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
 
     let from = dict["from"] as? String ?? ""
     let personName = dict["person_name"] as? String ?? ""
-    let flowName = dict["flow_name"] as? String ?? ""
+    let lineName = dict["line_name"] as? String ?? ""
     let expiresAt = (dict["expires_at"] as? NSNumber)?.doubleValue ?? 0
     let nowMs = Date().timeIntervalSince1970 * 1000
 
@@ -358,8 +396,10 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
     uuidByCallId[callId] = uuid
     callIdByUuid[uuid] = callId
     ringInfoByCallId[callId] = PendingCallAction(
-      kind: "answer", callId: callId, wsToken: wsToken, from: from,
-      personName: personName, flowName: flowName)
+      kind: PendingCallAction.kindAnswer, callId: callId, joinToken: joinToken,
+      from: from.isEmpty ? nil : from,
+      personName: personName.isEmpty ? nil : personName,
+      lineName: lineName.isEmpty ? nil : lineName)
 
     let update = CXCallUpdate()
     update.hasVideo = false
@@ -369,8 +409,8 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
     // The caller's name when known, else "Line · number".
     if !personName.isEmpty {
       update.localizedCallerName = personName
-    } else if !flowName.isEmpty {
-      update.localizedCallerName = from.isEmpty ? flowName : "\(flowName) · \(from)"
+    } else if !lineName.isEmpty {
+      update.localizedCallerName = from.isEmpty ? lineName : "\(lineName) · \(from)"
     }
 
     callProvider?.reportNewIncomingCall(with: uuid, update: update) { error in
@@ -429,14 +469,33 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
   }
 
   /// Queue an action for the webview and announce it. A live webview drains
-  /// on the event; a cold-started one drains after it boots.
+  /// on the event; a cold-started one drains after it boots. Identical
+  /// kind+callId actions are deduped, and the queue is capped so a webview
+  /// that never drains cannot accumulate tokens indefinitely.
   private func enqueueCallAction(_ action: PendingCallAction) {
-    pendingCallActions.append(action)
+    prunePendingCallActions()
+    let isDuplicate = pendingCallActions.contains {
+      $0.action.kind == action.kind && $0.action.callId == action.callId
+    }
+    if !isDuplicate {
+      pendingCallActions.append(QueuedCallAction(action: action, enqueuedAt: Date()))
+      if pendingCallActions.count > VoipPushPlugin.maxPendingCallActions {
+        pendingCallActions.removeFirst(
+          pendingCallActions.count - VoipPushPlugin.maxPendingCallActions)
+      }
+    }
     do {
       try trigger("call_action", data: action)
     } catch {
       NSLog("[voip-push] call_action trigger failed: %@", error.localizedDescription)
     }
+  }
+
+  /// Drop un-drained actions past their shelf life — the calls they belong
+  /// to are long over. Main-queue only.
+  private func prunePendingCallActions() {
+    let cutoff = Date().addingTimeInterval(-VoipPushPlugin.maxPendingActionAge)
+    pendingCallActions.removeAll { $0.enqueuedAt < cutoff }
   }
 
   // MARK: CXProviderDelegate
@@ -454,7 +513,7 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
       return
     }
     answeredCallIds.insert(callId)
-    enqueueCallAction(ring)  // kind == "answer", carries wsToken/from/names
+    enqueueCallAction(ring)  // kind == kindAnswer, carries joinToken/from/names
     // Note: iOS does NOT foreground the app on a lock-screen answer; the
     // webview joins the audio leg when the user opens the app (CallKit
     // shows our icon on the in-call screen). Foreground answers join
@@ -468,10 +527,10 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
       action.fulfill()
       return
     }
-    let kind = answeredCallIds.contains(callId) ? "end" : "decline"
-    enqueueCallAction(
-      PendingCallAction(
-        kind: kind, callId: callId, wsToken: "", from: "", personName: "", flowName: ""))
+    let kind =
+      answeredCallIds.contains(callId)
+      ? PendingCallAction.kindEnd : PendingCallAction.kindDecline
+    enqueueCallAction(PendingCallAction(kind: kind, callId: callId))
     cleanUpCall(callId)
     action.fulfill()
   }
