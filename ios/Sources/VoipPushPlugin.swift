@@ -370,6 +370,16 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
       // callId (push arrived out of order) flash-report one and end it.
       let reason = dict["reason"] as? String ?? ""
       let cxReason: CXCallEndedReason = reason.contains("answer") ? .answeredElsewhere : .remoteEnded
+      if !callId.isEmpty, answeredCallIds.contains(callId) {
+        // Answered on THIS device — the server's answered-elsewhere fan-out
+        // is for the user's other surfaces; ending here would kill the live
+        // system call (and its audio session) mid-conversation. The webview
+        // ends it via `endCall` when the call is actually over.
+        if let uuid = uuidByCallId[callId] {
+          callProvider?.reportCall(with: uuid, updated: CXCallUpdate())
+        }
+        return
+      }
       if !callId.isEmpty, uuidByCallId[callId] != nil {
         endSystemCall(callId: callId, reason: cxReason)
       } else {

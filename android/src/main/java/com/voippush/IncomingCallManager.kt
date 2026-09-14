@@ -184,12 +184,11 @@ object IncomingCallManager {
     /**
      * `call.ring_cancel` push: answered elsewhere, caller hung up, or timeout.
      * Also arrives on THIS device right after it answers when the backend
-     * fans out a cancel to all the user's devices — that's fine: by then
-     * the answer action is queued, the surfaces are already dismissed, and
-     * the webview is about to end the native call anyway, so this just
-     * tears down the Telecom connection a moment earlier.
+     * fans out a cancel to all the user's devices — ignored then: the webview
+     * owns the live call and ends it via `end_call` when it's actually over.
      */
     fun cancelRing(context: Context, callId: String, reason: String) {
+        if (CallStateStore(context).isAnswered(callId)) return
         val cause = if (reason.contains("answer")) {
             DisconnectCause(DisconnectCause.ANSWERED_ELSEWHERE)
         } else {
