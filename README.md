@@ -189,15 +189,23 @@ of a user's devices when the ring resolves anywhere.
 | `drain_pending_call_actions` | Read-and-clear queued Answer/Decline/End actions    |
 | `end_call`                   | Dismiss the native call UI for a `callId`           |
 
-| Event         | Platform | Fired when                                        |
-| ------------- | -------- | ------------------------------------------------- |
-| `voip_token`  | iOS      | PushKit VoIP token delivered/rotated              |
-| `fcm_token`   | Android  | FCM token rotated mid-session                     |
-| `call_action` | both     | A native call action was queued — drain the queue |
+| Event           | Platform | Fired when                                          |
+| --------------- | -------- | --------------------------------------------------- |
+| `voip_token`    | iOS      | PushKit VoIP token delivered/rotated                |
+| `fcm_token`     | Android  | FCM token rotated mid-session                       |
+| `call_action`   | both     | A native call action was queued — drain the queue   |
+| `audio_session` | iOS      | CallKit activated/deactivated the app audio session |
 
 The two token events stay separate on purpose: iOS carries **two** tokens
 (APNs alert + PushKit VoIP) with different destinations on your server,
 while Android has one FCM token.
+
+`audio_session` (`{ active: boolean }`) fires from CallKit's
+`didActivate` / `didDeactivate` callbacks. The plugin configures the shared
+`AVAudioSession` for a voice call (`.playAndRecord` / `.voiceChat`) before
+every incoming-call report and on Answer, but never activates it itself —
+CallKit does. Start (or resume) your WebRTC / Web Audio graph when
+`active` is `true`; a `resume()` issued before that point can hang.
 
 ## Security
 

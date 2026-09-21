@@ -100,3 +100,14 @@ export async function onFcmToken(
 ): Promise<PluginListener> {
   return addPluginListener(PLUGIN, 'fcm_token', handler);
 }
+
+/**
+ * iOS only: CallKit activated (`active: true`) or deactivated the app's
+ * audio session. Fires after an Answer and around system interruptions —
+ * the right moment to (re)start a WebRTC / Web Audio graph.
+ */
+export async function onAudioSession(
+  handler: (event: { active: boolean }) => void,
+): Promise<PluginListener> {
+  return addPluginListener(PLUGIN, 'audio_session', handler);
+}

@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- iOS: the shared `AVAudioSession` is configured for a voice call
+  (`.playAndRecord` / `.voiceChat`, Bluetooth allowed) before every
+  `reportNewIncomingCall` and on Answer, and CallKit's
+  `didActivate` / `didDeactivate` callbacks are forwarded to the webview as
+  the `audio_session` event (`{ active: boolean }`; `onAudioSession` in
+  `guest-js`) so WebRTC audio can start the moment the session is live.
 - Initial release: APNs/FCM push-token acquisition (`register_for_push`),
   native incoming-call UI (CallKit on iOS, self-managed Telecom +
   CallStyle notification on Android), and a durable Answer/Decline/End

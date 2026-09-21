@@ -1,3 +1,4 @@
+import AVFoundation
 import CallKit
 import ObjectiveC
 import PushKit
@@ -40,6 +41,12 @@ import WebKit
  *     and joins the call using the `joinToken` carried in the payload.
  *   - The webview calls `endCall` when a call ends (hangup, answered
  *     in-app, server cancel) so the green system call UI goes away.
+ *   - Audio: the shared `AVAudioSession` is configured for a voice call
+ *     (`.playAndRecord` / `.voiceChat`) before every `reportNewIncomingCall`
+ *     and again on Answer, as Apple requires — CallKit then activates it and
+ *     calls `provider(_:didActivate:)`, which is forwarded to the webview as
+ *     the `audio_session` event so it can (re)start its WebRTC audio graph
+ *     the moment the session is actually live.
  *
  * Everything CallKit-related runs on the main queue (PushKit is created with
  * `.main`, the CXProvider delegate queue is nil = main), so the call-state
@@ -411,6 +418,8 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
       personName: personName.isEmpty ? nil : personName,
       lineName: lineName.isEmpty ? nil : lineName)
 
+    configureCallAudioSession()
+
     let update = CXCallUpdate()
     update.hasVideo = false
     if !from.isEmpty {
@@ -470,6 +479,22 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
     cleanUpCall(callId)
   }
 
+  /// Put the shared audio session in voice-call shape. CallKit owns
+  /// activation (never call `setActive` here — it races the system and
+  /// breaks the in-call audio route); this only sets the category/mode so
+  /// that when CallKit activates it, the webview's WebRTC capture and
+  /// playback come up on a call-grade route (receiver/Bluetooth, not the
+  /// media speaker) instead of failing silently.
+  private func configureCallAudioSession() {
+    let session = AVAudioSession.sharedInstance()
+    do {
+      try session.setCategory(
+        .playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .allowBluetoothA2DP])
+    } catch {
+      NSLog("[voip-push] audio session configure failed: %@", error.localizedDescription)
+    }
+  }
+
   private func cleanUpCall(_ callId: String) {
     if let uuid = uuidByCallId.removeValue(forKey: callId) {
       callIdByUuid.removeValue(forKey: uuid)
@@ -523,12 +548,26 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
       return
     }
     answeredCallIds.insert(callId)
+    configureCallAudioSession()
     enqueueCallAction(ring)  // kind == kindAnswer, carries joinToken/from/names
     // Note: iOS does NOT foreground the app on a lock-screen answer; the
     // webview joins the audio leg when the user opens the app (CallKit
     // shows our icon on the in-call screen). Foreground answers join
     // immediately via the call_action event.
     action.fulfill()
+  }
+
+  /// CallKit activated our audio session (after Answer, or when the system
+  /// hands audio back after an interruption). Tell the webview so it can
+  /// resume its audio graph now rather than on a timer.
+  public func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
+    NSLog("[voip-push] audio session activated")
+    trigger("audio_session", data: ["active": true])
+  }
+
+  public func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
+    NSLog("[voip-push] audio session deactivated")
+    trigger("audio_session", data: ["active": false])
   }
 
   public func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
