@@ -172,6 +172,29 @@ Android — FCM **data** message, `priority: high`:
 | `person_name` | caller display name, optional                                  |       |
 | `line_name`   | line/queue display name, optional                              | shown as "Line · number" when `person_name` is absent |
 | `expires_at`  | ms-epoch ring deadline; the client auto-ends the ring after it |       |
+| `answer_url`  | absolute `https`/`http` URL, optional                          | POSTed natively on Answer — see below |
+
+#### Native answer callback
+
+When the user answers on the native call UI and the ring carried a
+non-empty `answer_url`, the plugin sends one fire-and-forget request
+(~10 s timeout, no retries) straight from native code, so your server
+learns about the answer even while the app is locked/backgrounded and the
+webview can't run JS yet:
+
+```http
+POST <answer_url>
+Content-Type: application/json
+
+{"call_id": "<call_id>", "join_token": "<join_token>", "device_id": "<deviceId>"}
+```
+
+`device_id` is the same `deviceId` `register_for_push` returns
+(`identifierForVendor` on iOS, `ANDROID_ID` on Android). Authenticate the
+request with `join_token`. The webview still receives the usual `answer`
+action; `answer_url` is not exposed to JS. Omit the key to disable the
+callback. On Android, plain `http` needs a cleartext-permitting network
+security config in the host app.
 
 ### Cancel
 
@@ -180,6 +203,15 @@ native disconnect cause: anything containing `answer` (e.g.
 `"answered_elsewhere"`) shows "answered on another device"; anything else
 (`"caller_hung_up"`, `"timeout"`, …) shows a remote hangup. Send it to all
 of a user's devices when the ring resolves anywhere.
+
+- **Call answered on this device:** a cancel whose `reason` contains
+  `answer` is ignored (it's your fan-out reaching the answering device).
+  Any other reason ends the native call and queues an `end` action so the
+  webview tears down.
+- **Cancel before ring:** APNs/FCM don't guarantee ordering. A cancel for a
+  call the device hasn't rung yet leaves a 60 s tombstone; a ring for that
+  `call_id` arriving within the window is not shown (iOS reports and
+  immediately ends it, as PushKit requires).
 
 ## Commands & events
 

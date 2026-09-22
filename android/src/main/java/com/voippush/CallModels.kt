@@ -21,6 +21,8 @@ data class RingPayload(
     val reason: String,
     /** ms epoch after which the ring is dead; 0 = no expiry supplied. */
     val expiresAt: Long,
+    /** Optional URL POSTed when the user answers natively; empty = no callback. */
+    val answerUrl: String = "",
 ) {
     val isExpired: Boolean
         get() = expiresAt > 0 && expiresAt <= System.currentTimeMillis()
@@ -38,10 +40,11 @@ data class RingPayload(
         else -> context.getString(R.string.voip_push_unknown_caller)
     }
 
-    /** Redacts the join token — a leaked one lets anyone join the call. */
+    /** Redacts the join token and answer URL — a leaked token lets anyone join the call. */
     override fun toString(): String =
         "RingPayload(action=$action, callId=$callId, joinToken=<redacted>, from=$from, " +
-            "personName=$personName, lineName=$lineName, reason=$reason, expiresAt=$expiresAt)"
+            "personName=$personName, lineName=$lineName, reason=$reason, expiresAt=$expiresAt, " +
+            "answerUrl=<redacted>)"
 
     companion object {
         /** Returns null when the message is not a ring/cancel or lacks a call id. */
@@ -60,6 +63,7 @@ data class RingPayload(
                 lineName = data["line_name"] ?: "",
                 reason = data["reason"] ?: "",
                 expiresAt = data["expires_at"]?.toLongOrNull() ?: 0L,
+                answerUrl = data["answer_url"] ?: "",
             )
         }
     }

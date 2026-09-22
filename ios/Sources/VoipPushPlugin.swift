@@ -106,6 +106,10 @@ class VoipPushPlugin: Plugin {
   private static let maxPendingCallActions = 50
   private static let maxPendingActionAge: TimeInterval = 24 * 60 * 60
 
+  /// How long a cancel that beat its ring push suppresses that ring.
+  private static let cancelTombstoneTTL: TimeInterval = 60
+  private static let answerCallbackTimeoutSeconds: TimeInterval = 10
+
   /// The host app's user-visible name, for CallKit surfaces.
   fileprivate static var appDisplayName: String {
     (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
@@ -130,6 +134,12 @@ class VoipPushPlugin: Plugin {
   /// Calls the user answered — an End tap on these is a hangup request,
   /// not a decline.
   fileprivate var answeredCallIds: Set<String> = []
+  /// Optional `answer_url` from the ring push, POSTed on a native Answer.
+  /// Kept out of `PendingCallAction` so the JS contract is unchanged.
+  fileprivate var answerUrlByCallId: [String: URL] = [:]
+  /// Cancels that arrived before their ring (APNs doesn't guarantee
+  /// ordering), so the late ring doesn't ring for its full lifetime.
+  private var cancelledBeforeRing: [String: Date] = [:]
   /// Accept/Decline/End taps not yet drained by the webview. A cold-started
   /// webview asks for these after it boots; a live webview drains on the
   /// `call_action` event. Deduped, capped, and age-expired — see
@@ -366,30 +376,41 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
 
   /// Expected payload shape (see README): flat keys `action`, `call_id`,
   /// `join_token`, `from`, `person_name`, `line_name`, `reason`,
-  /// `expires_at` (ms epoch).
+  /// `expires_at` (ms epoch), `answer_url` (optional).
   private func handleVoipPush(_ dict: [AnyHashable: Any]) {
     let action = dict["action"] as? String ?? ""
     let callId = dict["call_id"] as? String ?? ""
+    pruneCancelTombstones()
 
     if action == "cancel" {
       // Answered elsewhere / caller hung up / ring timed out. iOS demands
       // that EVERY VoIP push reports a call, so if we never rang for this
       // callId (push arrived out of order) flash-report one and end it.
       let reason = dict["reason"] as? String ?? ""
-      let cxReason: CXCallEndedReason = reason.contains("answer") ? .answeredElsewhere : .remoteEnded
+      let isAnsweredReason = reason.contains("answer")
+      let cxReason: CXCallEndedReason = isAnsweredReason ? .answeredElsewhere : .remoteEnded
       if !callId.isEmpty, answeredCallIds.contains(callId) {
-        // Answered on THIS device — the server's answered-elsewhere fan-out
-        // is for the user's other surfaces; ending here would kill the live
-        // system call (and its audio session) mid-conversation. The webview
-        // ends it via `endCall` when the call is actually over.
-        if let uuid = uuidByCallId[callId] {
-          callProvider?.reportCall(with: uuid, updated: CXCallUpdate())
+        if isAnsweredReason {
+          // Answered on THIS device — the server's answered-elsewhere fan-out
+          // is for the user's other surfaces; ending here would kill the live
+          // system call (and its audio session) mid-conversation. The webview
+          // ends it via `endCall` when the call is actually over.
+          if let uuid = uuidByCallId[callId] {
+            callProvider?.reportCall(with: uuid, updated: CXCallUpdate())
+          }
+          return
         }
+        // Caller hung up / ring timed out before the webview joined.
+        enqueueCallAction(PendingCallAction(kind: PendingCallAction.kindEnd, callId: callId))
+        endSystemCall(callId: callId, reason: .remoteEnded)
         return
       }
       if !callId.isEmpty, uuidByCallId[callId] != nil {
         endSystemCall(callId: callId, reason: cxReason)
       } else {
+        if !callId.isEmpty {
+          cancelledBeforeRing[callId] = Date()
+        }
         reportAndImmediatelyEnd(reason: cxReason)
       }
       return
@@ -400,6 +421,12 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
     else {
       NSLog("[voip-push] malformed VoIP push (action=%@) — reporting throwaway call", action)
       reportAndImmediatelyEnd(reason: .failed)
+      return
+    }
+
+    if cancelledBeforeRing[callId] != nil {
+      NSLog("[voip-push] ring for %@ was already cancelled — not ringing", callId)
+      reportAndImmediatelyEnd(reason: .answeredElsewhere)
       return
     }
 
@@ -417,6 +444,12 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
       from: from.isEmpty ? nil : from,
       personName: personName.isEmpty ? nil : personName,
       lineName: lineName.isEmpty ? nil : lineName)
+    if let answerUrlString = dict["answer_url"] as? String,
+      let answerUrl = URL(string: answerUrlString),
+      let scheme = answerUrl.scheme?.lowercased(), scheme == "https" || scheme == "http"
+    {
+      answerUrlByCallId[callId] = answerUrl
+    }
 
     configureCallAudioSession()
 
@@ -500,7 +533,55 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
       callIdByUuid.removeValue(forKey: uuid)
     }
     ringInfoByCallId.removeValue(forKey: callId)
+    answerUrlByCallId.removeValue(forKey: callId)
     answeredCallIds.remove(callId)
+  }
+
+  /// Main-queue only.
+  private func pruneCancelTombstones() {
+    let cutoff = Date().addingTimeInterval(-VoipPushPlugin.cancelTombstoneTTL)
+    cancelledBeforeRing = cancelledBeforeRing.filter { $0.value >= cutoff }
+  }
+
+  /// Tell the server this device answered, without waiting for the webview
+  /// (which can't run JS until the user opens the app after a lock-screen
+  /// answer). Fire-and-forget; a background task lets it finish while
+  /// suspended. Never logs the URL or the join token.
+  private func postAnswerCallback(url: URL, callId: String, joinToken: String) {
+    let body: [String: String] = [
+      "call_id": callId,
+      "join_token": joinToken,
+      "device_id": UIDevice.current.identifierForVendor?.uuidString ?? "unknown",
+    ]
+    guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+    var request = URLRequest(url: url, timeoutInterval: VoipPushPlugin.answerCallbackTimeoutSeconds)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = data
+
+    let app = UIApplication.shared
+    // Only touched on the main queue (expiration handler + hop below).
+    var backgroundTask = UIBackgroundTaskIdentifier.invalid
+    let endBackgroundTask: () -> Void = {
+      guard backgroundTask != .invalid else { return }
+      app.endBackgroundTask(backgroundTask)
+      backgroundTask = .invalid
+    }
+    backgroundTask = app.beginBackgroundTask(withName: "voip-push.answer-callback") {
+      NSLog("[voip-push] answer callback for %@ ran out of background time", callId)
+      endBackgroundTask()
+    }
+    let task = URLSession.shared.dataTask(with: request) { _, response, error in
+      if let error = error {
+        NSLog(
+          "[voip-push] answer callback for %@ failed: error %ld", callId, (error as NSError).code)
+      } else {
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        NSLog("[voip-push] answer callback for %@: HTTP %ld", callId, statusCode)
+      }
+      DispatchQueue.main.async { endBackgroundTask() }
+    }
+    task.resume()
   }
 
   /// Queue an action for the webview and announce it. A live webview drains
@@ -539,6 +620,7 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
     uuidByCallId.removeAll()
     callIdByUuid.removeAll()
     ringInfoByCallId.removeAll()
+    answerUrlByCallId.removeAll()
     answeredCallIds.removeAll()
   }
 
@@ -550,6 +632,11 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
     answeredCallIds.insert(callId)
     configureCallAudioSession()
     enqueueCallAction(ring)  // kind == kindAnswer, carries joinToken/from/names
+    if let answerUrl = answerUrlByCallId.removeValue(forKey: callId),
+      let joinToken = ring.joinToken
+    {
+      postAnswerCallback(url: answerUrl, callId: callId, joinToken: joinToken)
+    }
     // Note: iOS does NOT foreground the app on a lock-screen answer; the
     // webview joins the audio leg when the user opens the app (CallKit
     // shows our icon on the in-call screen). Foreground answers join

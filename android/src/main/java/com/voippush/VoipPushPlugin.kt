@@ -2,6 +2,7 @@ package com.voippush
 
 import android.Manifest
 import android.app.Activity
+import android.content.Context
 import android.os.Build
 import android.provider.Settings
 import android.webkit.WebView
@@ -154,17 +155,12 @@ class VoipPushPlugin(activity: Activity) : Plugin(activity) {
             }
             val result = JSObject()
             result.put("token", task.result)
-            result.put("deviceId", stableDeviceId())
+            result.put("deviceId", stableDeviceId(appContext))
             result.put("appVersion", appVersion())
             result.put("platform", "android")
             invoke.resolve(result)
         }
     }
-
-    /** Stable per app-install+signing-key+user; the Android analog of iOS `identifierForVendor`. */
-    private fun stableDeviceId(): String =
-        Settings.Secure.getString(appContext.contentResolver, Settings.Secure.ANDROID_ID)
-            ?: "unknown"
 
     private fun appVersion(): String = try {
         appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName ?: ""
@@ -176,6 +172,11 @@ class VoipPushPlugin(activity: Activity) : Plugin(activity) {
         /** The live plugin instance, for native→webview events. Set on load. */
         @Volatile
         var instance: VoipPushPlugin? = null
+
+        /** Stable per app-install+signing-key+user; the Android analog of iOS `identifierForVendor`. */
+        fun stableDeviceId(context: Context): String =
+            Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+                ?: "unknown"
     }
 }
 

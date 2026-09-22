@@ -12,7 +12,12 @@ import android.telecom.PhoneAccount
 import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
 import android.util.Log
+import org.json.JSONObject
 import java.lang.ref.WeakReference
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  * Android incoming-call orchestration — the counterpart of the CallKit
@@ -38,9 +43,20 @@ object IncomingCallManager {
 
     private const val TAG = "voip-push"
     private const val PHONE_ACCOUNT_ID = "voip-push"
+    private const val CANCEL_TOMBSTONE_TTL_MS = 60_000L
+    private const val ANSWER_CALLBACK_TIMEOUT_MS = 10_000
 
     /** Live Telecom connections by call id. Main-thread only. */
     private val connections = mutableMapOf<String, VoipConnection>()
+
+    /**
+     * Cancels that arrived before their ring (FCM doesn't guarantee
+     * ordering), by call id → ms epoch. Main-thread only.
+     */
+    private val cancelledBeforeRing = mutableMapOf<String, Long>()
+
+    /** Answer callbacks run here — network I/O must stay off the main thread. */
+    private val callbackExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
     /** Local ring-expiry timers (the server should also push a cancel; this is the fallback). */
     private val expiryHandler = Handler(Looper.getMainLooper())
@@ -55,6 +71,11 @@ object IncomingCallManager {
 
     /** A `call.ring` push arrived. Present the incoming call natively. */
     fun startRing(context: Context, ring: RingPayload) {
+        pruneCancelTombstones()
+        if (cancelledBeforeRing.containsKey(ring.callId)) {
+            Log.i(TAG, "dropping ring for ${ring.callId}: already cancelled")
+            return
+        }
         val store = CallStateStore(context)
         if (store.getRing(ring.callId) != null) return // duplicate push
         if (ring.isExpired || ring.joinToken.isEmpty()) {
@@ -145,6 +166,7 @@ object IncomingCallManager {
         dismissRingSurfaces(context, callId)
         launchApp(context)
         VoipPushPlugin.instance?.emitCallAction()
+        postAnswerCallback(context, ring)
     }
 
     /** User declined an un-answered ring. */
@@ -178,7 +200,7 @@ object IncomingCallManager {
     }
 
     // ---------------------------------------------------------------
-    // Non-user teardown (no action queued)
+    // Non-user teardown
     // ---------------------------------------------------------------
 
     /**
@@ -186,10 +208,26 @@ object IncomingCallManager {
      * Also arrives on THIS device right after it answers when the backend
      * fans out a cancel to all the user's devices — ignored then: the webview
      * owns the live call and ends it via `end_call` when it's actually over.
+     * Any other reason on an answered call (caller hung up before the
+     * webview joined) ends it and queues an `end` action.
      */
     fun cancelRing(context: Context, callId: String, reason: String) {
-        if (CallStateStore(context).isAnswered(callId)) return
-        val cause = if (reason.contains("answer")) {
+        pruneCancelTombstones()
+        val store = CallStateStore(context)
+        val isAnsweredReason = reason.contains("answer")
+        if (store.isAnswered(callId)) {
+            if (isAnsweredReason) return
+            store.enqueueAction(
+                PendingCallAction(kind = PendingCallAction.KIND_END, callId = callId),
+            )
+            cleanUp(context, callId, DisconnectCause(DisconnectCause.REMOTE))
+            VoipPushPlugin.instance?.emitCallAction()
+            return
+        }
+        if (store.getRing(callId) == null) {
+            cancelledBeforeRing[callId] = System.currentTimeMillis()
+        }
+        val cause = if (isAnsweredReason) {
             DisconnectCause(DisconnectCause.ANSWERED_ELSEWHERE)
         } else {
             DisconnectCause(DisconnectCause.REMOTE)
@@ -249,6 +287,53 @@ object IncomingCallManager {
             // still drains when the user opens the app (same behavior as
             // an iOS lock-screen answer).
             Log.w(TAG, "could not foreground app after answer", e)
+        }
+    }
+
+    private fun pruneCancelTombstones() {
+        val cutoff = System.currentTimeMillis() - CANCEL_TOMBSTONE_TTL_MS
+        cancelledBeforeRing.entries.removeAll { it.value < cutoff }
+    }
+
+    /**
+     * Tell the server this device answered without waiting for the webview
+     * to boot. Fire-and-forget, single attempt. Never logs the URL or the
+     * join token.
+     */
+    private fun postAnswerCallback(context: Context, ring: RingPayload) {
+        if (ring.answerUrl.isEmpty()) return
+        val url = try {
+            URL(ring.answerUrl)
+        } catch (e: Exception) {
+            Log.w(TAG, "answer callback for ${ring.callId}: invalid URL")
+            return
+        }
+        if (url.protocol != "https" && url.protocol != "http") return
+        val body = JSONObject()
+            .put("call_id", ring.callId)
+            .put("join_token", ring.joinToken)
+            .put("device_id", VoipPushPlugin.stableDeviceId(context))
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        val callId = ring.callId
+        callbackExecutor.execute {
+            var connection: HttpURLConnection? = null
+            try {
+                connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "POST"
+                connection.connectTimeout = ANSWER_CALLBACK_TIMEOUT_MS
+                connection.readTimeout = ANSWER_CALLBACK_TIMEOUT_MS
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.setFixedLengthStreamingMode(body.size)
+                connection.outputStream.use { it.write(body) }
+                Log.i(TAG, "answer callback for $callId: HTTP ${connection.responseCode}")
+            } catch (e: Exception) {
+                // Exception messages can carry the URL — log the type only.
+                Log.w(TAG, "answer callback for $callId failed: ${e.javaClass.simpleName}")
+            } finally {
+                connection?.disconnect()
+            }
         }
     }
 
