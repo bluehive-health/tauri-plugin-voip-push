@@ -40,6 +40,7 @@ class CallStateStore(context: Context) {
             .put("personName", ring.personName)
             .put("lineName", ring.lineName)
             .put("expiresAt", ring.expiresAt)
+            .put("answerUrl", ring.answerUrl)
             .put("answered", false)
         // commit(), not apply(): the FCM process can be killed right after
         // this write, and a lost ring means an unanswerable call.
@@ -72,6 +73,8 @@ class CallStateStore(context: Context) {
                 lineName = json.optString("lineName"),
                 reason = "",
                 expiresAt = expiresAt,
+                // Absent on rings stored before this field existed.
+                answerUrl = json.optString("answerUrl"),
             )
         } catch (e: Exception) {
             null

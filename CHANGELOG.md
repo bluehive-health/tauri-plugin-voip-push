@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Native answer callback: ring pushes may carry an optional `answer_url`.
+  When the user answers on the native call UI, the plugin POSTs
+  `{ call_id, join_token, device_id }` to it directly (iOS inside a
+  background task), so the server learns of a lock-screen answer without
+  waiting for the webview. Absent/empty `answer_url` keeps the old behavior.
+- Cancel-before-ring tombstones: a cancel for a call not yet rung
+  suppresses a matching ring that arrives within 60 seconds.
 - iOS: the shared `AVAudioSession` is configured for a voice call
   (`.playAndRecord` / `.voiceChat`, Bluetooth allowed) before every
   `reportNewIncomingCall` and on Answer, and CallKit's
@@ -23,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (token registration + rotation events only).
 - Rust command handlers for the full command surface; the blocking native
   bridge runs on the async runtime's blocking pool.
+
+### Changed
+
+- A cancel for a call answered on this device is only ignored when its
+  `reason` contains `answer`; any other reason (caller hung up, ring timed
+  out) now ends the native call and queues an `end` action for the webview.
 
 ### Security
 
