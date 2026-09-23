@@ -424,6 +424,15 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
       return
     }
 
+    if let existingUuid = uuidByCallId[callId] {
+      // Duplicate ring (redelivery, or the same token registered twice).
+      // Re-reporting the live UUID fails with `callUUIDAlreadyExists`, which
+      // still satisfies PushKit's report-every-push rule without a 2nd call.
+      NSLog("[voip-push] duplicate ring for %@ — already ringing", callId)
+      callProvider?.reportNewIncomingCall(with: existingUuid, update: CXCallUpdate()) { _ in }
+      return
+    }
+
     if cancelledBeforeRing[callId] != nil {
       NSLog("[voip-push] ring for %@ was already cancelled — not ringing", callId)
       reportAndImmediatelyEnd(reason: .answeredElsewhere)

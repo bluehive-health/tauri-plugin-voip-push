@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- iOS: a `ring` for a `call_id` that is already ringing (or answered) on
+  this device is ignored instead of raising a second CallKit call and
+  orphaning the first. Android already dropped duplicate rings.
 - A cancel for a call answered on this device is only ignored when its
   `reason` contains `answer`; any other reason (caller hung up, ring timed
   out) now ends the native call and queues an `end` action for the webview.
