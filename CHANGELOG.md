@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- iOS: `end_call` on an answered call now waits (bounded, 2 s) for CallKit's
+  `didActivate` before reporting the end, and resolves only once the end is
+  reported. Ending the call mid-activation left the audio session held with
+  no `didDeactivate` to follow, so a webview that then started its own
+  audio ran silently (two-way dead air until the app was backgrounded). A
+  `didActivate` that still lands with no live call is released
+  (`setActive(false)`) and reported to the webview as `audio_session
+  { active: false }`.
+
 ### Added
 
 - Native answer callback: ring pushes may carry an optional `answer_url`.
