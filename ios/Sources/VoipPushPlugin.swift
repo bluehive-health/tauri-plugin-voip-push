@@ -47,6 +47,17 @@ import WebKit
  *     calls `provider(_:didActivate:)`, which is forwarded to the webview as
  *     the `audio_session` event so it can (re)start its WebRTC audio graph
  *     the moment the session is actually live.
+ *   - Hand-off ordering: an answered CallKit call gives THIS process the
+ *     audio session, but a webview's audio runs in WebKit's own process, so
+ *     the webview ends the system call (`endCall`) before it captures.
+ *     CallKit activates the session asynchronously after Answer; ending the
+ *     call before that activation lands leaves the late `didActivate` with
+ *     no call to deactivate for, and the session stays held — the webview
+ *     then captures and plays into silence. So `endCall` on an answered
+ *     call waits (bounded) for `didActivate` before reporting the end, and
+ *     resolves only once the end is reported, which is when CallKit starts
+ *     deactivating. A `didActivate` that still lands with no call left is
+ *     released here, since nothing else will.
  *
  * Everything CallKit-related runs on the main queue (PushKit is created with
  * `.main`, the CXProvider delegate queue is nil = main), so the call-state
@@ -82,6 +93,14 @@ struct EndCallArgs: Decodable {
   let callId: String
 }
 
+/// An `endCall` waiting for CallKit's audio-session activation before the
+/// end is reported; `timeout` ends the call anyway if activation never lands.
+struct DeferredEnd {
+  let reason: CXCallEndedReason
+  let timeout: DispatchWorkItem
+  var completions: [() -> Void]
+}
+
 struct DrainCallActionsResponse: Encodable {
   let actions: [PendingCallAction]
 }
@@ -109,6 +128,10 @@ class VoipPushPlugin: Plugin {
   /// How long a cancel that beat its ring push suppresses that ring.
   private static let cancelTombstoneTTL: TimeInterval = 60
   private static let answerCallbackTimeoutSeconds: TimeInterval = 10
+  /// How long an `endCall` on an answered call waits for CallKit to activate
+  /// the audio session before ending anyway (activation normally lands well
+  /// under a second after Answer; this only bounds a CallKit that never does).
+  private static let audioActivationWaitSeconds: TimeInterval = 2
 
   /// The host app's user-visible name, for CallKit surfaces.
   fileprivate static var appDisplayName: String {
@@ -140,6 +163,12 @@ class VoipPushPlugin: Plugin {
   /// Cancels that arrived before their ring (APNs doesn't guarantee
   /// ordering), so the late ring doesn't ring for its full lifetime.
   private var cancelledBeforeRing: [String: Date] = [:]
+  /// CallKit has activated our audio session and not yet deactivated it.
+  fileprivate var audioSessionActive = false
+  /// Answered calls whose audio-session activation hasn't landed yet.
+  fileprivate var awaitingAudioActivation: Set<String> = []
+  /// `endCall`s for answered calls, parked until activation (or its timeout).
+  fileprivate var deferredEnds: [String: DeferredEnd] = [:]
   /// Accept/Decline/End taps not yet drained by the webview. A cold-started
   /// webview asks for these after it boots; a live webview drains on the
   /// `call_action` event. Deduped, capped, and age-expired — see
@@ -332,12 +361,16 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
   }
 
   /// The webview reports the call is over (hangup, answered in-app, server
-  /// cancel) — dismiss the system call UI if it's still up.
+  /// cancel) — dismiss the system call UI if it's still up. Resolves once the
+  /// end has been reported to CallKit: for an answered call that can wait
+  /// for the audio session to activate first (see `endSystemCall`), so the
+  /// webview's own wait for the session release starts at the right moment.
   @objc func endCall(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(EndCallArgs.self)
     DispatchQueue.main.async {
-      self.endSystemCall(callId: args.callId, reason: .remoteEnded)
-      invoke.resolve()
+      self.endSystemCall(callId: args.callId, reason: .remoteEnded) {
+        invoke.resolve()
+      }
     }
   }
 
@@ -513,12 +546,55 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
     }
   }
 
-  /// Dismiss the system call UI (if up) and forget the call.
-  fileprivate func endSystemCall(callId: String, reason: CXCallEndedReason) {
+  /// Dismiss the system call UI (if up) and forget the call. `completion`
+  /// runs once the end has been reported to CallKit.
+  ///
+  /// An answered call whose audio session CallKit hasn't activated yet is
+  /// ended only once `didActivate` lands (bounded by
+  /// `audioActivationWaitSeconds`): ending it mid-activation leaves the
+  /// session activated for a call CallKit has already forgotten, with no
+  /// `didDeactivate` to release it — and the webview's audio, which needs
+  /// the session, then runs silently. Ending after activation makes CallKit
+  /// deactivate and report it, which is what the webview waits for.
+  fileprivate func endSystemCall(
+    callId: String, reason: CXCallEndedReason, completion: @escaping () -> Void = {}
+  ) {
+    guard let uuid = uuidByCallId[callId] else {
+      cleanUpCall(callId)
+      completion()
+      return
+    }
+    if awaitingAudioActivation.contains(callId), !audioSessionActive {
+      if var deferred = deferredEnds[callId] {
+        deferred.completions.append(completion)
+        deferredEnds[callId] = deferred
+        return
+      }
+      NSLog("[voip-push] end of %@ waits for audio session activation", callId)
+      let timeout = DispatchWorkItem { [weak self] in
+        NSLog("[voip-push] audio session never activated for %@ — ending anyway", callId)
+        self?.performDeferredEnd(callId: callId)
+      }
+      deferredEnds[callId] = DeferredEnd(reason: reason, timeout: timeout, completions: [completion])
+      DispatchQueue.main.asyncAfter(
+        deadline: .now() + VoipPushPlugin.audioActivationWaitSeconds, execute: timeout)
+      return
+    }
+    callProvider?.reportCall(with: uuid, endedAt: nil, reason: reason)
+    cleanUpCall(callId)
+    completion()
+  }
+
+  /// Report a parked end now (activation landed, or the wait timed out).
+  private func performDeferredEnd(callId: String) {
+    guard let deferred = deferredEnds.removeValue(forKey: callId) else { return }
+    deferred.timeout.cancel()
+    awaitingAudioActivation.remove(callId)
     if let uuid = uuidByCallId[callId] {
-      callProvider?.reportCall(with: uuid, endedAt: nil, reason: reason)
+      callProvider?.reportCall(with: uuid, endedAt: nil, reason: deferred.reason)
     }
     cleanUpCall(callId)
+    deferred.completions.forEach { $0() }
   }
 
   /// Put the shared audio session in voice-call shape. CallKit owns
@@ -544,6 +620,12 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
     ringInfoByCallId.removeValue(forKey: callId)
     answerUrlByCallId.removeValue(forKey: callId)
     answeredCallIds.remove(callId)
+    awaitingAudioActivation.remove(callId)
+    if let deferred = deferredEnds.removeValue(forKey: callId) {
+      // Ended by another path (system End tap, server cancel) while parked.
+      deferred.timeout.cancel()
+      deferred.completions.forEach { $0() }
+    }
   }
 
   /// Main-queue only.
@@ -626,11 +708,17 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
   // MARK: CXProviderDelegate
 
   public func providerDidReset(_ provider: CXProvider) {
+    for callId in Array(deferredEnds.keys) {
+      // The calls are gone; let the waiting webview proceed.
+      cleanUpCall(callId)
+    }
     uuidByCallId.removeAll()
     callIdByUuid.removeAll()
     ringInfoByCallId.removeAll()
     answerUrlByCallId.removeAll()
     answeredCallIds.removeAll()
+    awaitingAudioActivation.removeAll()
+    audioSessionActive = false
   }
 
   public func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
@@ -639,6 +727,9 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
       return
     }
     answeredCallIds.insert(callId)
+    if !audioSessionActive {
+      awaitingAudioActivation.insert(callId)
+    }
     configureCallAudioSession()
     enqueueCallAction(ring)  // kind == kindAnswer, carries joinToken/from/names
     if let answerUrl = answerUrlByCallId.removeValue(forKey: callId),
@@ -655,14 +746,43 @@ extension VoipPushPlugin: PKPushRegistryDelegate, CXProviderDelegate {
 
   /// CallKit activated our audio session (after Answer, or when the system
   /// hands audio back after an interruption). Tell the webview so it can
-  /// resume its audio graph now rather than on a timer.
+  /// resume its audio graph now rather than on a timer, and report any end
+  /// that was waiting for this so CallKit deactivates the session again.
   public func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
     NSLog("[voip-push] audio session activated")
+    audioSessionActive = true
+    awaitingAudioActivation.removeAll()
     trigger("audio_session", data: ["active": true])
+    if !deferredEnds.isEmpty {
+      // Reporting the end now makes CallKit deactivate the session itself.
+      for callId in Array(deferredEnds.keys) {
+        performDeferredEnd(callId: callId)
+      }
+    } else if uuidByCallId.isEmpty {
+      // Activated for a call that is already over (ended past the wait in
+      // `endSystemCall`, or from the system UI). CallKit won't deactivate a
+      // session for a call it no longer tracks, so release it here or the
+      // webview's audio never gets it.
+      releaseOrphanedAudioSession(audioSession)
+    }
   }
 
   public func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
     NSLog("[voip-push] audio session deactivated")
+    audioSessionActive = false
+    trigger("audio_session", data: ["active": false])
+  }
+
+  /// Deactivate a session CallKit activated with no live call to own it, and
+  /// tell the webview, which waits on the release before it captures.
+  private func releaseOrphanedAudioSession(_ audioSession: AVAudioSession) {
+    NSLog("[voip-push] audio session activated with no live call — releasing")
+    do {
+      try audioSession.setActive(false, options: [.notifyOthersOnDeactivation])
+    } catch {
+      NSLog("[voip-push] orphaned audio session release failed: %@", error.localizedDescription)
+    }
+    audioSessionActive = false
     trigger("audio_session", data: ["active": false])
   }
 
